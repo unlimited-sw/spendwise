@@ -3,6 +3,24 @@ import {
   Plus, Trash2, X, ChevronDown, Calendar, DollarSign,
   FileText, Sparkles, TrendingUp, Wallet, Settings, User
 } from "lucide-react";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, onValue, set, remove, push } from "firebase/database";
+
+// ===== FIREBASE CONFIG =====
+const firebaseConfig = {
+  apiKey: "AIzaSyCz0N9jNuPitnki77nV1E1ryFGs_j1VxTM",
+  authDomain: "spendwise-dd71f.firebaseapp.com",
+  databaseURL: "https://spendwise-dd71f-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "spendwise-dd71f",
+  storageBucket: "spendwise-dd71f.firebasestorage.app",
+  messagingSenderId: "505840276996",
+  appId: "1:505840276996:web:c59a0d10ead8fde50c4751",
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+// ===== CONSTANTS =====
 
 const COLORS = [
   { bg: "bg-amber-100", text: "text-amber-700", bar: "bg-amber-400" },
@@ -59,28 +77,11 @@ const PERSON_COLORS = {
 
 const today = () => new Date().toISOString().split("T")[0];
 
-function loadJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveJSON(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
-}
+// ===== APP =====
 
 export default function App() {
-  const [expenses, setExpenses] = useState(() =>
-    loadJSON("spendwise_expenses", [])
-  );
-  const [categories, setCategories] = useState(() =>
-    loadJSON("spendwise_categories", DEFAULT_CATEGORIES)
-  );
+  const [expenses, setExpenses] = useState([]);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [selectedDate, setSelectedDate] = useState(today());
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
@@ -93,17 +94,46 @@ export default function App() {
   const [newCatEmoji, setNewCatEmoji] = useState("☕");
   const [showManage, setShowManage] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const dropRef = useRef(null);
 
-  // Persist expenses
+  // Listen to Firebase Realtime Database
   useEffect(() => {
-    saveJSON("spendwise_expenses", expenses);
-  }, [expenses]);
+    const expRef = ref(db, "expenses");
+    const unsubExp = onValue(expRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list = Object.entries(data).map(([key, val]) => ({
+          ...val,
+          id: key,
+        }));
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setExpenses(list);
+      } else {
+        setExpenses([]);
+      }
+      setLoaded(true);
+    });
 
-  // Persist categories
-  useEffect(() => {
-    saveJSON("spendwise_categories", categories);
-  }, [categories]);
+    const catRef = ref(db, "categories");
+    const unsubCat = onValue(catRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list = Object.entries(data).map(([key, val]) => ({
+          ...val,
+          id: key,
+        }));
+        setCategories([...DEFAULT_CATEGORIES, ...list]);
+      } else {
+        setCategories(DEFAULT_CATEGORIES);
+      }
+    });
+
+    return () => {
+      unsubExp();
+      unsubCat();
+    };
+  }, []);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -117,43 +147,51 @@ export default function App() {
 
   const addExpense = () => {
     if (!amount || parseFloat(amount) <= 0) return;
-    const exp = {
-      id: Date.now().toString(),
+    const expRef = ref(db, "expenses");
+    const newRef = push(expRef);
+    set(newRef, {
       amount: parseFloat(parseFloat(amount).toFixed(2)),
       description: description.trim() || "No description",
       categoryId,
       date,
       person,
-    };
-    setExpenses((p) => [exp, ...p]);
+      createdAt: Date.now(),
+    });
     setAmount("");
     setDescription("");
     setDate(today());
   };
 
-  const deleteExpense = (id) =>
-    setExpenses((p) => p.filter((e) => e.id !== id));
+  const deleteExpense = (id) => {
+    const expRef = ref(db, "expenses/" + id);
+    remove(expRef);
+  };
 
   const addCategory = () => {
     if (!newCatName.trim()) return;
-    const cat = {
-      id: "custom_" + Date.now(),
+    const catRef = ref(db, "categories");
+    const newRef = push(catRef);
+    set(newRef, {
       name: newCatName.trim(),
       emoji: newCatEmoji,
       colorIdx: categories.length % COLORS.length,
       isDefault: false,
-    };
-    setCategories((p) => [...p, cat]);
+    });
     setNewCatName("");
     setNewCatEmoji("☕");
     setShowCatModal(false);
   };
 
   const deleteCategory = (id) => {
-    setCategories((p) => p.filter((c) => c.id !== id));
-    setExpenses((p) =>
-      p.map((e) => (e.categoryId === id ? { ...e, categoryId: "misc" } : e))
-    );
+    const catRef = ref(db, "categories/" + id);
+    remove(catRef);
+    // Move expenses with deleted category to misc
+    expenses.forEach((e) => {
+      if (e.categoryId === id) {
+        const expRef = ref(db, "expenses/" + e.id);
+        set(expRef, { ...e, categoryId: "misc", id: undefined });
+      }
+    });
   };
 
   const filteredExpenses = expenses.filter(
@@ -178,6 +216,22 @@ export default function App() {
     count: expenses.filter((e) => e.date === selectedDate && e.person === p)
       .length,
   }));
+
+  if (!loaded) {
+    return (
+      <div
+        className="min-h-screen bg-gray-50 flex items-center justify-center"
+        style={{ fontFamily: "'Inter', system-ui, -apple-system, sans-serif" }}
+      >
+        <div className="text-center">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center mx-auto mb-3 animate-pulse">
+            <Wallet size={20} color="white" />
+          </div>
+          <p className="text-gray-400 text-sm">Loading SpendWise...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
